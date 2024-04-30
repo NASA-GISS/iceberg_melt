@@ -1,0 +1,132 @@
+
+#+PROPERTY: header-args:jupyter-python+ :dir (file-name-directory buffer-file-name) :session icebergs
+
+
+* Table of contents                               :toc_3:noexport:
+- [[#introduction][Introduction]]
+- [[#notes][Notes]]
+- [[#setup-grass-environment][Setup GRASS environment]]
+- [[#import-iceberg-db][Import iceberg DB]]
+- [[#import-rignot-basins][Import Rignot basins]]
+- [[#assign-rignot-basin-to-start-of-each-iceberg-trajectory][Assign Rignot basin to start of each iceberg trajectory]]
+- [[#merge-all-icebergs-into-one-database][Merge all icebergs into one database]]
+- [[#build-density-map-for-each-basin][Build density map for each basin]]
+
+* Introduction
+
+Iceberg melt locations by Rignot sector iceberg source
+
+All basins and icebergs:
+[[./fig/basin_all.png]]
+
+Basin 4:
+[[./fig/basin_04.png]]
+
+Basin 7:
+[[./fig/basin_07.png]]
+
+
+* Notes
+
++ This is a first pass. May not be properly processed. Does not make use of "flags" field in CSV data.
++ The iceberg database contains iceberg size (sometimes, rarely), so we can maybe sometimes estimate melt rate between each observation. The current density maps only show iceberg density at each location.
++ Only large icebergs are tracked. Many smaller bergs will melt nearer to shelf fronts. These, being small, should perhaps inject freshwater at the surface, and not be lumped with sub-shelf melt which injects freshwater at depth.
+
+* Setup GRASS environment
+
+#+BEGIN_SRC bash :exports both :results verbatim
+rm -fR G
+grass -c EPSG:3031 G
+#+END_SRC
+
+* Import iceberg DB
+
+#+BEGIN_SRC bash :exports both :results verbatim
+g.mapset -c icebergs
+root=${DATADIR}/Budge_2018/stats_database_v7.1/
+csv=$(ls ${root}|head -n1) # debug
+for csv in ${root}/*; do
+  base=$(basename ${csv%.*}) # filename w/o remove extension
+  cat ${csv} \
+    | tail -n +2 \
+    | awk -F',' '{print $6"|"$5"|"$1"|"$2"|"$3"|"$4"|"$7"|"$8"|"$9}' \
+    | m.proj -i input=- \
+    | tr ' ' '|' \
+    | v.in.ascii input=- output=${base} columns="x double precision, y double precision, yyyydoy double, date_gap int, disp double, flags int, mask int, size double, vel_angle double"
+done
+#+END_SRC
+
+Set up a grid, and make it square, and save it
+
+#+BEGIN_SRC bash :exports both :results verbatim
+# Set up a 100 km grid
+g.region vector=$(g.list type=vector separator=,) res=100000 -pa
+
+max=$(echo "${e} ${w} ${n} ${s}" | tr ' ' '\n'  | datamash absmax 1)
+g.region w=-${max} e=${max} s=-${max} n=${max} -pa
+g.region save=domain
+#+END_SRC
+
+* Import Rignot basins
+
+#+BEGIN_SRC bash :exports both :results verbatim
+g.mapset -c basins
+v.import input=${DATADIR}/IMBIE/Rignot/ANT_Basins_IMBIE2_v1.6.shp output=basins
+
+# remove islands
+v.edit map=basins where="cat == 1" tool=delete
+#+END_SRC
+
+* Assign Rignot basin to start of each iceberg trajectory
+
+#+BEGIN_SRC bash :exports both :results verbatim
+g.mapset icebergs
+berg=a63 # debug
+for berg in $(g.list type=vector | grep -v basins); do
+  v.db.addcolumn map=${berg} columns="basincat int"
+  v.distance from=${berg} to=basins@basins upload=cat column=basincat # nearest basin at each time
+  # v.db.select map=${berg} | head # started here
+  # v.db.select map=${berg} | tail # moved to here
+  # set all basincats to first (initial location)
+  basincat0=$(db.select -c sql="select basincat from ${berg}" | head -n1)
+  db.execute sql="update ${berg} set basincat = ${basincat0}"
+  # v.db.select map=${berg} | tail # check...
+done
+#+END_SRC
+
+* Merge all icebergs into one database
+
+#+BEGIN_SRC bash :exports both :results verbatim
+v.patch -e input=$(g.list type=vector separator=,) output=bergs
+#+END_SRC
+
+Visualize
+
+#+BEGIN_SRC bash :exports both :results verbatim
+d.mon wx0
+d.vect bergs
+#+END_SRC
+
+* Build density map for each basin
+
+#+BEGIN_SRC bash :exports both :results verbatim
+b=09 # debug
+
+# add new column for counting
+v.db.addcolumn bergs column="count integer"
+v.db.update bergs column=count value=1
+
+for b in $(seq -w 19); do
+  echo $b
+  # v.to.rast input=bergs where="basincat == ${b}" output=${b}... # no density option
+  v.out.ascii input=bergs where="basincat == ${b}" column=count output=- \
+    | r.in.xyz input=- z=4 output=basin_${b} method=sum
+  r.null map=basin_${b} setnull=0
+done
+
+# all
+v.out.ascii input=bergs column=count output=- \
+    | r.in.xyz input=- z=4 output=basin_all method=sum
+r.null map=basin_all setnull=0
+#+END_SRC
+
