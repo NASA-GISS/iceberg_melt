@@ -62,6 +62,7 @@ Set up a grid, and make it square, and save it
 # Set up a 100 km grid
 g.region vector=$(g.list type=vector separator=,) res=100000 -pa
 
+eval $(g.region -pg)
 max=$(echo "${e} ${w} ${n} ${s}" | tr ' ' '\n'  | datamash absmax 1)
 g.region w=-${max} e=${max} s=-${max} n=${max} -pa
 g.region save=domain
